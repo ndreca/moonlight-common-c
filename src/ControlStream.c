@@ -1046,7 +1046,7 @@ static void controlReceiveThreadFunc(void* context) {
 
     while (!PltIsThreadInterrupted(&controlReceiveThread)) {
         ENetEvent event;
-        enet_uint32 waitTimeMs;
+        enet_uint32 waitTimeMs = 0;
 
         PltLockMutex(&enetMutex);
 
