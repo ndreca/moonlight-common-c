@@ -535,6 +535,11 @@ void LiStopConnection(void);
 // so it is not safe to start another connection before the first LiStartConnection() call returns.
 void LiInterruptConnection(void);
 
+// Waits for any asynchronous connection-termination callback from the prior
+// process-global connection to finish. Clients that publish callback targets
+// outside Limelight should call this before replacing those targets.
+void LiWaitForPendingTerminationCallback(void);
+
 // Use to get a user-visible string to display initialization progress
 // from the integer passed to the ConnListenerStageXXX callbacks
 const char* LiGetStageName(int stage);
