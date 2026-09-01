@@ -1,10 +1,16 @@
 #include "Limelight-internal.h"
+#include <stdatomic.h>
 
 static int stage = STAGE_NONE;
 static ConnListenerConnectionTerminated originalTerminationCallback;
 static bool alreadyTerminated;
 static PLT_THREAD terminationCallbackThread;
 static int terminationCallbackErrorCode;
+// 0 = no callback, 1 = thread creation in progress, 2 = joinable callback.
+// We intentionally keep the termination callback joinable so the next global
+// connection cannot replace ListenerCallbacks while an old callback is still
+// using them.
+static atomic_int terminationCallbackThreadState;
 
 // Common globals
 char* RemoteAddrString;
@@ -167,16 +173,18 @@ static void ClInternalConnectionTerminated(int errorCode)
     terminationCallbackErrorCode = errorCode;
     alreadyTerminated = true;
 
-    // Invoke the termination callback on a separate thread
+    // Invoke the termination callback on a separate thread. Keep it joinable;
+    // the next LiStartConnection() drains it before publishing new globals.
+    atomic_store_explicit(&terminationCallbackThreadState, 1, memory_order_release);
     err = PltCreateThread("AsyncTerm", terminationCallbackThreadFunc, NULL, &terminationCallbackThread);
     if (err != 0) {
+        atomic_store_explicit(&terminationCallbackThreadState, 0, memory_order_release);
         // Nothing we can safely do here, so we'll just assert on debug builds
         Limelog("Failed to create termination thread: %d\n", err);
         LC_ASSERT(err == 0);
+        return;
     }
-
-    // Detach the thread since we never wait on it
-    PltDetachThread(&terminationCallbackThread);
+    atomic_store_explicit(&terminationCallbackThreadState, 2, memory_order_release);
 }
 
 static bool parseRtspPortNumberFromUrl(const char* rtspSessionUrl, uint16_t* port)
@@ -205,11 +213,28 @@ static bool parseRtspPortNumberFromUrl(const char* rtspSessionUrl, uint16_t* por
     return true;
 }
 
+void LiWaitForPendingTerminationCallback(void)
+{
+    int terminationState;
+    while ((terminationState = atomic_load_explicit(&terminationCallbackThreadState, memory_order_acquire)) == 1) {
+        PltSleepMs(1);
+    }
+    if (terminationState == 2) {
+        PltJoinThread(&terminationCallbackThread);
+        atomic_store_explicit(&terminationCallbackThreadState, 0, memory_order_release);
+    }
+}
+
 // Starts the connection to the streaming machine
 int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION streamConfig, PCONNECTION_LISTENER_CALLBACKS clCallbacks,
     PDECODER_RENDERER_CALLBACKS drCallbacks, PAUDIO_RENDERER_CALLBACKS arCallbacks, void* renderContext, int drFlags,
     void* audioContext, int arFlags) {
     int err;
+
+    // Limelight has process-global callbacks. Drain any asynchronous
+    // termination from the previous generation before those callbacks and
+    // their Objective-C target are replaced by this connection.
+    LiWaitForPendingTerminationCallback();
 
     if (drCallbacks != NULL && (drCallbacks->capabilities & CAPABILITY_PULL_RENDERER) && drCallbacks->submitDecodeUnit) {
         Limelog("CAPABILITY_PULL_RENDERER cannot be set with a submitDecodeUnit callback\n");
